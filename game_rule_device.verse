@@ -16,7 +16,9 @@ game_rule_device := class(creative_device):
     @editable
     TeamScoreDisplay : team_score_display_device = team_score_display_device{}
     @editable
-    InfectionDisplay : infection_mode_display_device = infection_mode_display_device{} 
+    InfectionDisplay : infection_mode_display_device = infection_mode_display_device{}
+    @editable
+    VoteSelectionDisplay : vote_selection_widget_device = vote_selection_widget_device{}
 
     #// SHIP
     @editable
@@ -62,6 +64,8 @@ game_rule_device := class(creative_device):
     # Infectionモード有効フラグ
     var IsInfectionMode : logic = false
     var PlayerAddedSubscribed : logic = false
+
+    var VoteTeleportTriggered : logic = false
     
     # チーム変更エフェクト用（オプション）
     @editable
@@ -116,9 +120,27 @@ game_rule_device := class(creative_device):
         vote_optionB.WinVoteEvent.Subscribe(OnVoteBSuccess)
         #vote_optionC.WinVoteEvent.Subscribe(OnVoteCSuccess)
         #vote_optionD.WinVoteEvent.Subscribe(OnVoteDSuccess)
-    
-        vote_group.EndVoteEvent.Subscribe(player_teleport)
+
+        VoteSelectionDisplay.OnVoteButtonClickedEvent().Subscribe(HandleVoteWidgetInteraction)
+        vote_group.StartVoteEvent.Subscribe(OnVoteStarted)
+        vote_group.EndVoteEvent.Subscribe(OnVoteEnded)
         vote_group.VoteTiedEvent.Subscribe(randam_vote_select)
+
+    OnVoteStarted(_: ?agent) : void =
+        Print("Vote started - showing selection UI")
+        set VoteTeleportTriggered = false
+        VoteSelectionDisplay.ShowVoteSelectionUI()
+
+    OnVoteEnded(_: ?agent) : void =
+        Print("Vote ended - hiding selection UI")
+        VoteSelectionDisplay.HideVoteSelectionUI()
+        if(VoteTeleportTriggered = false):
+            set VoteTeleportTriggered = true
+            player_teleport()
+
+    HandleVoteWidgetInteraction(InteractingPlayer:player):void=
+        Print("Vote widget button pressed by {InteractingPlayer}")
+        # ここに任意の処理を追加。例: HUDメッセージ表示やメニューオープンなど
 
     # 投票終了後に全プレイヤーをチーム別にテレポート
     player_teleport() : void =
@@ -163,8 +185,12 @@ game_rule_device := class(creative_device):
             Print("Random selection: Infection Mode")
             OnVoteBSuccess(false)
 
-        # 全プレイヤーをテレポート
-        player_teleport()
+        VoteSelectionDisplay.HideVoteSelectionUI()
+
+        if(VoteTeleportTriggered = false):
+            set VoteTeleportTriggered = true
+            # 全プレイヤーをテレポート
+            player_teleport()
 
     # プレイヤーをランダムなテレポーターデバイスにテレポート
     TeleportPlayerToRandomDevice(Player : agent, Teleporters : []teleporter_device, TeamName : string) : void =

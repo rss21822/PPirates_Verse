@@ -16,7 +16,9 @@ game_rule_device := class(creative_device):
     @editable
     TeamScoreDisplay : team_score_display_device = team_score_display_device{}
     @editable
-    InfectionDisplay : infection_mode_display_device = infection_mode_display_device{} 
+    InfectionDisplay : infection_mode_display_device = infection_mode_display_device{}
+    @editable
+    VoteSelectionDisplay : vote_selection_widget_device = vote_selection_widget_device{}
 
     #// SHIP
     @editable
@@ -58,10 +60,14 @@ game_rule_device := class(creative_device):
     var teams_playerCount_length : [team]int = map{}
     # 撃破されたチーム
     var eliminatedTeams : []team = array{}
+    var InfectionMonitorRunning : logic = false
+    var InfectionVictoryTriggered : logic = false
     
     # Infectionモード有効フラグ
     var IsInfectionMode : logic = false
     var PlayerAddedSubscribed : logic = false
+
+    var VoteTeleportTriggered : logic = false
     
     # チーム変更エフェクト用（オプション）
     @editable
@@ -116,9 +122,27 @@ game_rule_device := class(creative_device):
         vote_optionB.WinVoteEvent.Subscribe(OnVoteBSuccess)
         #vote_optionC.WinVoteEvent.Subscribe(OnVoteCSuccess)
         #vote_optionD.WinVoteEvent.Subscribe(OnVoteDSuccess)
-    
-        vote_group.EndVoteEvent.Subscribe(player_teleport)
+
+        VoteSelectionDisplay.OnVoteButtonClickedEvent().Subscribe(HandleVoteWidgetInteraction)
+        vote_group.StartVoteEvent.Subscribe(OnVoteStarted)
+        vote_group.EndVoteEvent.Subscribe(OnVoteEnded)
         vote_group.VoteTiedEvent.Subscribe(randam_vote_select)
+
+    OnVoteStarted(_: ?agent) : void =
+        Print("Vote started - showing selection UI")
+        set VoteTeleportTriggered = false
+        VoteSelectionDisplay.ShowVoteSelectionUI()
+
+    OnVoteEnded(_: ?agent) : void =
+        Print("Vote ended - hiding selection UI")
+        VoteSelectionDisplay.HideVoteSelectionUI()
+        if(VoteTeleportTriggered = false):
+            set VoteTeleportTriggered = true
+            player_teleport()
+
+    HandleVoteWidgetInteraction(InteractingPlayer:player):void=
+        Print("Vote widget button pressed by {InteractingPlayer}")
+        # ここに任意の処理を追加。例: HUDメッセージ表示やメニューオープンなど
 
     # 投票終了後に全プレイヤーをチーム別にテレポート
     player_teleport() : void =
@@ -163,8 +187,12 @@ game_rule_device := class(creative_device):
             Print("Random selection: Infection Mode")
             OnVoteBSuccess(false)
 
-        # 全プレイヤーをテレポート
-        player_teleport()
+        VoteSelectionDisplay.HideVoteSelectionUI()
+
+        if(VoteTeleportTriggered = false):
+            set VoteTeleportTriggered = true
+            # 全プレイヤーをテレポート
+            player_teleport()
 
     # プレイヤーをランダムなテレポーターデバイスにテレポート
     TeleportPlayerToRandomDevice(Player : agent, Teleporters : []teleporter_device, TeamName : string) : void =
@@ -185,7 +213,10 @@ game_rule_device := class(creative_device):
         Print("Deathmatch Mode Selected")  # ← 修正
         GameModeText.SetText(ScoreMessage("Mode: Deathmatch"))  # ← 修正
         set IsInfectionMode = false
-        
+
+        StopInfectionMonitor()
+        set InfectionVictoryTriggered = false
+
         InfectionDisplay.DeactivateUI()
         
         # Deathmatch　Mode UIを有効化
@@ -196,8 +227,10 @@ game_rule_device := class(creative_device):
         Print("Infection Mode Started")
         GameModeText.SetText(ScoreMessage("Mode: Infection"))
         set IsInfectionMode = true
-        
+
         set eliminatedTeams = array{}
+        set InfectionVictoryTriggered = false
+        StopInfectionMonitor()
         TeamScoreDisplay.ActivateInfectionMode()
 
         if(PlayerAddedSubscribed = false):
@@ -209,6 +242,7 @@ game_rule_device := class(creative_device):
         
         # 初期のチーム人数でUIを更新（少し遅延を入れて確実に）
         spawn{InitialInfectionUIUpdate()}
+        StartInfectionMonitor()
         
         # 全プレイヤーのEliminatedEventを購読
         AllPlayers := GetPlayspace().GetPlayers()
@@ -233,6 +267,7 @@ game_rule_device := class(creative_device):
         
         # プレイヤーを自チームの船にテレポート（少し遅延）
         spawn{TeleportLateJoiningPlayer(InPlayer)}
+        spawn{DelayedInfectionUIUpdate()}
 
     TeleportLateJoiningPlayer(InPlayer : player)<suspends> : void =
         if(IsInfectionMode = false):
@@ -306,12 +341,6 @@ game_rule_device := class(creative_device):
                             # 同一チーム内での撃破（フレンドリーファイア）
                             Print("Friendly fire detected - no team change")
     
-        # 終了条件のチェック
-        CheckInfectionEndCondition(EliminatorPlayer)
-        
-        # チーム全滅の確認と通知
-        CheckEliminatedTeams()
-
     # 遅延UI更新（チーム変更が完了してから）
     DelayedInfectionUIUpdate()<suspends> : void =
         Sleep(0.3)
@@ -376,6 +405,8 @@ game_rule_device := class(creative_device):
         # デバッグ用Billboard更新
         TeamBalanceText.SetText(TeamBalanceMessage(Team1Count, Team2Count, Team3Count, Team4Count))
 
+        ProcessInfectionTeamCounts(Team1Count, Team2Count, Team3Count, Team4Count)
+
     # チーム変更の実行
     PerformTeamChange(Agent : agent, NewTeam : team) : void =
         if (NewTeam = Teams[0]):
@@ -412,81 +443,98 @@ game_rule_device := class(creative_device):
         if(FortCharacter := Player.GetFortCharacter[]):
             TeamChangeVFX.Pickup(Player)
 
-    # Infection終了条件のチェック
-    CheckInfectionEndCondition(EliminatorPlayer : ?fort_character) : void =
-        Print("Checking Infection end condition")
-        
-        TeamCollection := GetPlayspace().GetTeamCollection()
+    StartInfectionMonitor() : void =
+        if(InfectionMonitorRunning = true):
+            return
+
+        set InfectionMonitorRunning = true
+        spawn{MonitorInfectionTeams()}
+
+    StopInfectionMonitor() : void =
+        set InfectionMonitorRunning = false
+
+    MonitorInfectionTeams()<suspends> : void =
+        while(IsInfectionMode = true and InfectionMonitorRunning = true):
+            UpdateInfectionUI()
+            Sleep(1.0)
+
+        set InfectionMonitorRunning = false
+
+    ProcessInfectionTeamCounts(Team1Count : int, Team2Count : int, Team3Count : int, Team4Count : int) : void =
+        TeamCounts := array{Team1Count, Team2Count, Team3Count, Team4Count}
         var ActiveTeams : int = 0
-        var WinningTeam : ?team = false
-        
-        # アクティブなチームをカウント
-        for (i := 0..3):
-            if (i < Teams.Length):
-                if (TeamCollection.GetAgents[Teams[i]].Length > 0):
+        var PotentialWinningTeam : ?team = false
+
+        for (Index := 0..3):
+            if (Index < Teams.Length):
+                CurrentTeam := Teams[Index]
+                var CurrentCount : int = 0
+
+                if (Index < TeamCounts.Length):
+                    if(CountValue := TeamCounts[Index]):
+                        set CurrentCount = CountValue
+
+                if (CurrentCount = 0):
+                    RegisterTeamElimination(CurrentTeam)
+                else:
+                    ClearTeamElimination(CurrentTeam)
                     set ActiveTeams += 1
-                    set WinningTeam = option{Teams[i]}
-        
-        Print("Active teams: {ActiveTeams}")
-        
-        # 1チームだけ残った場合（全員が一つのチームに集まった）
-        if (ActiveTeams = 1):
-            var VictoryAgent : ?agent = false
+                    set PotentialWinningTeam = option{CurrentTeam}
 
-            # 通常の対人キルで勝利した場合は淘汰側のエージェントを使う
-            if (EliminatedFortCharacter := fort_character[EliminatorPlayer?], EliminatedAgent := EliminatedFortCharacter.GetAgent[]):
-                set VictoryAgent = option{EliminatedAgent}
-            # 環境ダメージなどで Eliminator が不明な場合は勝利チームの誰かを探す
-            else if (WinningTeamValue := WinningTeam?):
-                if(WinningTeamAgents := TeamCollection.GetAgents[WinningTeamValue]):
-                    if (WinningTeamAgents.Length > 0):
-                        if (FirstAgent := WinningTeamAgents[0]):
-                            set VictoryAgent = option{FirstAgent}
+        if (eliminatedTeams.Length >= 3 or ActiveTeams = 1):
+            if (PotentialWinningTeamValue := PotentialWinningTeam?):
+                TriggerInfectionVictory(PotentialWinningTeamValue)
 
-            if (UnwrappedVictoryAgent := VictoryAgent?):
-                Print("Infection Victory! All players united in one team!")
-                EndGame.Activate(UnwrappedVictoryAgent)
-            else:
-                Print("Infection victory detected, but no agent available to trigger EndGame.")
+    RegisterTeamElimination(TargetTeam : team) : void =
+        if(not eliminatedTeams.Find[TargetTeam]):
+            if(set eliminatedTeams += array{TargetTeam}):
+                TeamName := GetTeamDisplayName(TargetTeam)
+                Print("{TeamName} Team is Eliminated!")
+                HUDMessage.SetText(ScoreMessage("{TeamName} Team is Eliminated!"))
+                HUDMessage.Show()
 
-    # チーム全滅の確認と通知
-    CheckEliminatedTeams() : void =
+    ClearTeamElimination(TargetTeam : team) : void =
+        if(eliminatedTeams.Find[TargetTeam]):
+            var UpdatedList : []team = array{}
+
+            for (ExistingTeam : eliminatedTeams):
+                if (ExistingTeam <> TargetTeam):
+                    if(set UpdatedList += array{ExistingTeam}):
+                        continue
+
+            set eliminatedTeams = UpdatedList
+
+    TriggerInfectionVictory(WinnerTeam : team) : void =
+        if(InfectionVictoryTriggered = true):
+            return
+
+        set InfectionVictoryTriggered = true
+        StopInfectionMonitor()
+        set IsInfectionMode = false
+
         TeamCollection := GetPlayspace().GetTeamCollection()
-        
-        # チーム1（Red）人数確認
-        if(Teams.Length > 0):
-            if(TeamCollection.GetAgents[Teams[0]].Length = 0):
-                if(not eliminatedTeams.Find[Teams[0]]):
-                    if(set eliminatedTeams += array{Teams[0]}):
-                        Print("Red Team is Eliminated!")
-                        HUDMessage.SetText(ScoreMessage("Red Team is Eliminated!"))
-                        HUDMessage.Show()
+        if(WinnerAgents := TeamCollection.GetAgents[WinnerTeam]):
+            if(WinnerAgents.Length > 0):
+                if(VictoryAgent := WinnerAgents[0]):
+                    TeamName := GetTeamDisplayName(WinnerTeam)
+                    Print("Infection Victory! {TeamName} Team remains.")
+                    HUDMessage.SetText(ScoreMessage("{TeamName} Team Wins Infection!"))
+                    HUDMessage.Show()
+                    EndGame.Activate(VictoryAgent)
+                    return
 
-        # チーム2（Blue）人数確認
-        if(Teams.Length > 1):
-            if(TeamCollection.GetAgents[Teams[1]].Length = 0):
-                if(not eliminatedTeams.Find[Teams[1]]):
-                    if(set eliminatedTeams += array{Teams[1]}):
-                        Print("Blue Team is Eliminated!")
-                        HUDMessage.SetText(ScoreMessage("Blue Team is Eliminated!"))
-                        HUDMessage.Show()
+        Print("Infection victory detected, but no agent available to trigger EndGame.")
 
-        # チーム3（Green）人数確認
-        if(Teams.Length > 2):
-            if(TeamCollection.GetAgents[Teams[2]].Length = 0):
-                if(not eliminatedTeams.Find[Teams[2]]):
-                    if(set eliminatedTeams += array{Teams[2]}):
-                        Print("Green Team is Eliminated!")
-                        HUDMessage.SetText(ScoreMessage("Green Team is Eliminated!"))
-                        HUDMessage.Show()
+    GetTeamDisplayName(TargetTeam : team) : string =
+        if(Teams.Length > 0 and TargetTeam = Teams[0]):
+            return "Red"
+        else if(Teams.Length > 1 and TargetTeam = Teams[1]):
+            return "Blue"
+        else if(Teams.Length > 2 and TargetTeam = Teams[2]):
+            return "Green"
+        else if(Teams.Length > 3 and TargetTeam = Teams[3]):
+            return "Yellow"
 
-        # チーム4（Yellow）人数確認
-        if(Teams.Length > 3):
-            if(TeamCollection.GetAgents[Teams[3]].Length = 0):
-                if(not eliminatedTeams.Find[Teams[3]]):
-                    if(set eliminatedTeams += array{Teams[3]}):
-                        Print("Yellow Team is Eliminated!")
-                        HUDMessage.SetText(ScoreMessage("Yellow Team is Eliminated!"))
-                        HUDMessage.Show()
+        return "Unknown"
 
 

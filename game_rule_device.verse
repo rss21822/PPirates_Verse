@@ -10,29 +10,23 @@ using { /Fortnite.com/UI }
 using { /Verse.org/Colors }
 using { /Verse.org/Random }
 
-# Pilfering Pirates - Infection Mode Device
-game_rule_device := class(creative_device): 
-    # team_score_display_deviceへの参照を追加
+# Pilfering Pirates - Main Game Rule Device
+game_rule_device := class(creative_device):
+    # References to display devices for Deathmatch and Infection modes
     @editable
     TeamScoreDisplay : team_score_display_device = team_score_display_device{}
     @editable
     InfectionDisplay : infection_mode_display_device = infection_mode_display_device{}
-    @editable
-    VoteSelectionDisplay : vote_selection_widget_device = vote_selection_widget_device{}
 
-    #// SHIP
+    # Ship props for each team (excluding Team 1/Red)
     @editable
     Ship2 : creative_prop = creative_prop{}
     @editable
     Ship3 : creative_prop = creative_prop{}
     @editable
     Ship4 : creative_prop = creative_prop{}
-    
-    #// 投票時間終了タイマー
-    @editable
-    vote_group : vote_group_device = vote_group_device{}
 
-    #// チームごとのプレイヤースポナーを@editableで割り当て
+    # Teleporter devices for each team's ship (used for spawning/respawning)
     @editable
     player_teleportor_team1 : []teleporter_device  = array{}
     @editable
@@ -42,7 +36,7 @@ game_rule_device := class(creative_device):
     @editable
     player_teleportor_team4 : []teleporter_device  = array{}
 
-    #// チームごとのクラスセレクターを@editableで割り当て
+    # Class and team selector devices for team switching (used in Infection mode)
     @editable
     class_selector1 : class_and_team_selector_device = class_and_team_selector_device{}
     @editable
@@ -51,98 +45,92 @@ game_rule_device := class(creative_device):
     class_selector3 : class_and_team_selector_device = class_and_team_selector_device{}
     @editable
     class_selector4 : class_and_team_selector_device = class_and_team_selector_device{}
- 
+
     var Teams:[]team = array{}
-    
-    #// プレイヤーとチーム情報のリスト
+
+    # Map of players to their current teams
     var players_and_teams : [player]team = map{}
-    #// プレイヤー数とチームのリスト
+    # Map of teams to their player counts
     var teams_playerCount_length : [team]int = map{}
-    # 撃破されたチーム
+    # Array tracking which teams have been eliminated (Infection mode)
     var eliminatedTeams : []team = array{}
-    
-    # Infectionモード有効フラグ
+
+    # Infection mode state flags
     var IsInfectionMode : logic = false
     var PlayerAddedSubscribed : logic = false
+    var InfectionMonitorActive : logic = false
+    var InfectionGameEnded : logic = false
 
-    var VoteTeleportTriggered : logic = false
-    
-    # チーム変更エフェクト用（オプション）
+    # Visual effect played when a player changes teams (optional)
     @editable
     TeamChangeVFX : visual_effect_powerup_device = visual_effect_powerup_device{}
-    
-    #// 投票オプション
+
+    # Vote group device for game mode selection
+    @editable
+    vote_group : vote_group_device = vote_group_device{}
+    # Vote options (A = Deathmatch, B = Infection)
     @editable
     vote_optionA : vote_option_device = vote_option_device {}
     @editable
     vote_optionB : vote_option_device = vote_option_device {}
-    
+
+    # Reserved for future game modes (Mega Ships, etc.)
     #@editable
     #vote_optionC : vote_option_device = vote_option_device {}
     #@editable
     #vote_optionD : vote_option_device = vote_option_device {}
-    
-    @editable 
+
+    # Team settings devices for tracking eliminations in Deathmatch mode
+    @editable
     TeamOneRed : team_settings_and_inventory_device = team_settings_and_inventory_device{}
-    @editable 
+    @editable
     TeamTwoBlue : team_settings_and_inventory_device = team_settings_and_inventory_device{}
 
+    # End game device for triggering victory
     @editable
     EndGame : end_game_device = end_game_device{}
 
+    # Vote selection UI widget
+    VoteSelectionUI : vote_selection_widget = vote_selection_widget{}
+    var VoteWidgetPlayerAddedSubscribed : logic = false
+    # UI devices for displaying messages and debug information
     @editable
     HUDMessage : hud_message_device = hud_message_device{}
-    
-    # デバッグ用 & チームバランス表示用
     @editable
     TeamBalanceText : billboard_device = billboard_device{}
     @editable
     GameModeText : billboard_device = billboard_device{}
 
+    # Localized message helpers
     ScoreMessage<localizes>(msg:string):message="{msg}"
     TeamBalanceMessage<localizes>(team1:int, team2:int, team3:int, team4:int):message="Red:{team1} Blue:{team2} Green:{team3} Yellow:{team4}"
-    
-    #// OnBeginで全プレイヤーとチーム情報を収集、タイマー成功イベントをSubscribe
+
+    # Initialize game on start - collect player/team info and subscribe to vote events
     OnBegin<override>()<suspends> : void =
 
-        # Teams 配列を島設定のチーム構成で更新
+        vote_group.BeginVote()
+        VoteSelectionUI.SetOwningDevice(Self)
+
+        # Update Teams array with island configuration
         TeamCollection := GetPlayspace().GetTeamCollection()
         set Teams = TeamCollection.GetTeams()
 
-        # 初期チーム人数を設定
+        # Initialize player count for each team
         for(Team : Teams):
             if(TeamPlayers := TeamCollection.GetAgents[Team].Length):
                 if(set teams_playerCount_length[Team] = TeamPlayers):
                     Print("Team initialized with {TeamPlayers} players")
 
-        # 投票イベントの登録
+        # Subscribe to vote events
         vote_optionA.WinVoteEvent.Subscribe(OnVoteASuccess)
         vote_optionB.WinVoteEvent.Subscribe(OnVoteBSuccess)
         #vote_optionC.WinVoteEvent.Subscribe(OnVoteCSuccess)
         #vote_optionD.WinVoteEvent.Subscribe(OnVoteDSuccess)
 
-        VoteSelectionDisplay.OnVoteButtonClickedEvent().Subscribe(HandleVoteWidgetInteraction)
-        vote_group.StartVoteEvent.Subscribe(OnVoteStarted)
-        vote_group.EndVoteEvent.Subscribe(OnVoteEnded)
+        vote_group.EndVoteEvent.Subscribe(player_teleport)
         vote_group.VoteTiedEvent.Subscribe(randam_vote_select)
 
-    OnVoteStarted(_: ?agent) : void =
-        Print("Vote started - showing selection UI")
-        set VoteTeleportTriggered = false
-        VoteSelectionDisplay.ShowVoteSelectionUI()
-
-    OnVoteEnded(_: ?agent) : void =
-        Print("Vote ended - hiding selection UI")
-        VoteSelectionDisplay.HideVoteSelectionUI()
-        if(VoteTeleportTriggered = false):
-            set VoteTeleportTriggered = true
-            player_teleport()
-
-    HandleVoteWidgetInteraction(InteractingPlayer:player):void=
-        Print("Vote widget button pressed by {InteractingPlayer}")
-        # ここに任意の処理を追加。例: HUDメッセージ表示やメニューオープンなど
-
-    # 投票終了後に全プレイヤーをチーム別にテレポート
+    # Teleport all players to their team ships after voting ends
     player_teleport() : void =
         Print("Vote ended - Teleporting players to their team ships...")
 
@@ -150,52 +138,47 @@ game_rule_device := class(creative_device):
         AllPlayers := GetPlayspace().GetPlayers()
 
         for (Player : AllPlayers):
-            # プレイヤーのチームを取得
+            # Get player's team assignment
             if (PlayerTeam := TeamCollection.GetTeam[Player]):
-                # チームに応じてテレポート
-                if (PlayerTeam = Teams[0]):
-                    # Team 1 (Red) - ランダムなテレポーターを選択
+                var TeamCount : int = Teams.Length
+
+                if (TeamCount > 0 and PlayerTeam = Teams[0]):
                     TeleportPlayerToRandomDevice(Player, player_teleportor_team1, "Red")
-                else if (PlayerTeam = Teams[1]):
-                    # Team 2 (Blue)
+                else if (TeamCount > 1 and PlayerTeam = Teams[1]):
                     TeleportPlayerToRandomDevice(Player, player_teleportor_team2, "Blue")
-                else if (PlayerTeam = Teams[2]):
-                    # Team 3 (Green)
+                else if (TeamCount > 2 and PlayerTeam = Teams[2]):
                     TeleportPlayerToRandomDevice(Player, player_teleportor_team3, "Green")
-                else if (PlayerTeam = Teams[3]):
-                    # Team 4 (Yellow)
+                else if (TeamCount > 3 and PlayerTeam = Teams[3]):
                     TeleportPlayerToRandomDevice(Player, player_teleportor_team4, "Yellow")
+                else:
+                    Print("Warning: No teleport mapping for player team.")
 
         Print("All players teleported to their team ships!")
 
 
-    # 引き分け時にVote A、Bどちらかをランダムで選択し、player_teleport()を呼び出す
+    # Handle vote tie - randomly select between Vote A and B, then teleport players
     randam_vote_select() : void =
         Print("Vote tied! Randomly selecting game mode...")
 
-        # 0または1をランダムに生成 (Vote A or Vote B)
+        # Generate random integer 0 or 1 (Vote A or Vote B)
         RandomChoice := GetRandomInt(0, 1)
 
         if (RandomChoice = 0):
-            # Vote A (Deathmatch) を選択
+            # Vote A (Deathmatch) selected
             Print("Random selection: Deathmatch Mode")
             OnVoteASuccess(false)
         else:
-            # Vote B (Infection) を選択
+            # Vote B (Infection) selected
             Print("Random selection: Infection Mode")
             OnVoteBSuccess(false)
 
-        VoteSelectionDisplay.HideVoteSelectionUI()
+        # Teleport all players
+        player_teleport()
 
-        if(VoteTeleportTriggered = false):
-            set VoteTeleportTriggered = true
-            # 全プレイヤーをテレポート
-            player_teleport()
-
-    # プレイヤーをランダムなテレポーターデバイスにテレポート
+    # Teleport a player to a random teleporter device from the given array
     TeleportPlayerToRandomDevice(Player : agent, Teleporters : []teleporter_device, TeamName : string) : void =
         if (Teleporters.Length > 0):
-            # ランダムなインデックスを生成
+            # Generate random index
             RandomIndex := GetRandomInt(0, Teleporters.Length - 1)
 
             if (SelectedTeleporter := Teleporters[RandomIndex]):
@@ -205,86 +188,136 @@ game_rule_device := class(creative_device):
                 Print("Warning: Failed to get teleporter at index {RandomIndex} for {TeamName} team")
         else:
             Print("Warning: No teleporters configured for {TeamName} team")
-        
-    # -----------------------------------Vote A-----------------------------------
+
+    # Vote A: Deathmatch Mode
     OnVoteASuccess(InPlayer : ?agent) : void =
-        Print("Deathmatch Mode Selected")  # ← 修正
-        GameModeText.SetText(ScoreMessage("Mode: Deathmatch"))  # ← 修正
+        Print("Deathmatch Mode Selected")
+        GameModeText.SetText(ScoreMessage("Mode: Deathmatch"))
         set IsInfectionMode = false
-        
+        StopInfectionMonitor()
+        set InfectionGameEnded = false
+
         InfectionDisplay.DeactivateUI()
-        
-        # Deathmatch　Mode UIを有効化
+
+        # Activate Deathmatch Mode UI
         TeamScoreDisplay.ActivateDeathmatchMode()
 
-    # -----------------------------------Vote B - Infection Mode-----------------------------------
+    # Vote B: Infection Mode
     OnVoteBSuccess(InPlayer : ?agent) : void =
         Print("Infection Mode Started")
+        StopInfectionMonitor()
+        set InfectionGameEnded = false
         GameModeText.SetText(ScoreMessage("Mode: Infection"))
         set IsInfectionMode = true
-        
+
         set eliminatedTeams = array{}
         TeamScoreDisplay.ActivateInfectionMode()
 
         if(PlayerAddedSubscribed = false):
             GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAdded)
             set PlayerAddedSubscribed = true
-        
-        # Infection Mode UIを有効化
+
         InfectionDisplay.ActivateInfectionUI()
-        
-        # 初期のチーム人数でUIを更新（少し遅延を入れて確実に）
+
         spawn{InitialInfectionUIUpdate()}
-        
-        # 全プレイヤーのEliminatedEventを購読
+
         AllPlayers := GetPlayspace().GetPlayers()
         for (Player : AllPlayers):
             if (FortCharacter := Player.GetFortCharacter[]):
                 FortCharacter.EliminatedEvent().Subscribe(OnPlayerEliminatedInfection)
-        
+
         HUDMessage.SetText(ScoreMessage("Infection Mode: Eliminate enemies to recruit them!"))
         HUDMessage.Show()
-        
 
+        StartInfectionMonitor()
+    # Start monitoring infection teams for elimination/victory conditions
+    StartInfectionMonitor() : void =
+        if(InfectionMonitorActive = true):
+            return
+
+        set InfectionMonitorActive = true
+        spawn{MonitorInfectionTeams()}
+
+    # Stop monitoring infection teams
+    StopInfectionMonitor() : void =
+        if(InfectionMonitorActive = false):
+            return
+
+        set InfectionMonitorActive = false
+
+    # Continuously monitor infection teams and check victory conditions
+    MonitorInfectionTeams()<suspends> : void =
+        if(IsInfectionMode = false or InfectionMonitorActive = false or InfectionGameEnded = true):
+            set InfectionMonitorActive = false
+            return
+
+        UpdateInfectionUI()
+        CheckEliminatedTeams()
+        CheckInfectionEndCondition(false)
+
+        Sleep(1.0)
+
+        if(IsInfectionMode = true and InfectionMonitorActive = true and InfectionGameEnded = false):
+            spawn{MonitorInfectionTeams()}
+        else:
+            set InfectionMonitorActive = false
+
+    # Handle player joining mid-game during Infection mode
     OnPlayerAdded(InPlayer : player) : void =
         if(IsInfectionMode = false):
             return
 
         Print("New player joined the game!")
-        
-        # Infectionモードの撃破イベントを購読
-        if(IsInfectionMode = true):
-            if(FortCharacter := InPlayer.GetFortCharacter[]):
-                FortCharacter.EliminatedEvent().Subscribe(OnPlayerEliminatedInfection)
-        
-        # プレイヤーを自チームの船にテレポート（少し遅延）
-        spawn{TeleportLateJoiningPlayer(InPlayer)}
 
+        # Subscribe to elimination event for Infection mode
+        if(FortCharacter := InPlayer.GetFortCharacter[]):
+            FortCharacter.EliminatedEvent().Subscribe(OnPlayerEliminatedInfection)
+
+        # Teleport player to their team ship (with delay)
+        spawn{TeleportLateJoiningPlayer(InPlayer)}
+        spawn{EnsureLateJoinerUI(InPlayer)}
+
+    # Teleport late-joining player to their team ship
     TeleportLateJoiningPlayer(InPlayer : player)<suspends> : void =
         if(IsInfectionMode = false):
             return
 
-        Sleep(1.0)  # キャラクター生成完了を待つ
-        
+        Sleep(1.0)  # Wait for character spawn to complete
+
         TeamCollection := GetPlayspace().GetTeamCollection()
         if(PlayerTeam := TeamCollection.GetTeam[InPlayer]):
-            if (PlayerTeam = Teams[0]):
+            var TeamCount : int = Teams.Length
+
+            if (TeamCount > 0 and PlayerTeam = Teams[0]):
                 TeleportPlayerToRandomDevice(InPlayer, player_teleportor_team1, "Red")
-            else if (PlayerTeam = Teams[1]):
+            else if (TeamCount > 1 and PlayerTeam = Teams[1]):
                 TeleportPlayerToRandomDevice(InPlayer, player_teleportor_team2, "Blue")
-            else if (PlayerTeam = Teams[2]):
+            else if (TeamCount > 2 and PlayerTeam = Teams[2]):
                 TeleportPlayerToRandomDevice(InPlayer, player_teleportor_team3, "Green")
-            else if (PlayerTeam = Teams[3]):
+            else if (TeamCount > 3 and PlayerTeam = Teams[3]):
                 TeleportPlayerToRandomDevice(InPlayer, player_teleportor_team4, "Yellow")
-    
-    # -----------------------------------Vote C-----------------------------------
+            else:
+                Print("Warning: No teleport mapping for late joining player team.")
+
+    # Ensure late joiner UI is properly updated
+    EnsureLateJoinerUI(InPlayer : player)<suspends> : void =
+        Sleep(0.6)
+        if(IsInfectionMode = false):
+            return
+
+        UpdateInfectionUI()
+        CheckEliminatedTeams()
+        CheckInfectionEndCondition(false)
+
+
+    # Vote C: Reserved for future game mode (Mega Ships)
     <#
     OnVoteCSuccess(InPlayer : ?agent) : void =
         Print("Mega Ships Mode Selected")
         GameModeText.SetText(ScoreMessage("Mode: Mega Ships"))
         set IsInfectionMode = false
     #>
-    # -----------------------------------Vote D-----------------------------------
+    # Vote D: Reserved for future game mode
     <#
     OnVoteDSuccess(InPlayer : ?agent) : void =
         Print("Deathmatch Mode Selected")
@@ -292,177 +325,194 @@ game_rule_device := class(creative_device):
         set IsInfectionMode = false
     #>
 
-    # 初期UI更新（遅延を入れて確実に初期値を取得）
+    # Initial UI update with delay to ensure team counts are accurate
     InitialInfectionUIUpdate()<suspends> : void =
         Sleep(0.5)
         UpdateInfectionUI()
 
-    # Infectionモード専用の撃破処理
+    # Handle player elimination in Infection mode
     OnPlayerEliminatedInfection(Result : elimination_result) : void =
         if(IsInfectionMode = false):
             return
 
         Print("Player eliminated in Infection mode!")
-    
+
         EliminatorPlayer := Result.EliminatingCharacter
         EliminatedPlayer := Result.EliminatedCharacter
-    
+
         if (EliminatedFortCharacter := EliminatedPlayer, EliminatedAgent := EliminatedFortCharacter.GetAgent[]):
             if(EliminatedPlayerTeam := GetPlayspace().GetTeamCollection().GetTeam[EliminatedAgent]):
                 if (EliminationFortCharacter := EliminatorPlayer?, EliminatorAgent := EliminationFortCharacter.GetAgent[]):
                     if(EliminatorPlayerTeam := GetPlayspace().GetTeamCollection().GetTeam[EliminatorAgent]):
-                        
-                        # 異なるチーム間の撃破のみ処理
+
+                        # Only process eliminations between different teams
                         if(EliminatedPlayerTeam <> EliminatorPlayerTeam):
                             Print("Team change: Player moving to new team")
 
-                            # チーム変更の実行
+                            # Execute team change
                             PerformTeamChange(EliminatedAgent, EliminatorPlayerTeam)
 
-                            # チーム変更通知
+                            # Notify player of team change
                             if(AfterEliminatedPlayer := player[EliminatedAgent]):
                                 ShowTeamChangeNotification(AfterEliminatedPlayer, EliminatorPlayerTeam)
 
-                            # Infectionモード: 新しいチームの船にテレポート
+                            # Infection mode: Teleport to new team's ship
                             spawn{TeleportToNewTeamShip(EliminatedAgent, EliminatorPlayerTeam)}
 
-                            # UI更新を遅延実行（チーム変更が完了してから）
+                            # Update UI with delay (after team change completes)
                             spawn{DelayedInfectionUIUpdate()}
                         else:
-                            # 同一チーム内での撃破（フレンドリーファイア）
+                            # Same team elimination (friendly fire)
                             Print("Friendly fire detected - no team change")
-    
-        # 終了条件のチェック
+
+        # Check for end conditions
         CheckInfectionEndCondition(EliminatorPlayer)
-        
-        # チーム全滅の確認と通知
+
+        # Check for eliminated teams
         CheckEliminatedTeams()
 
-    # 遅延UI更新（チーム変更が完了してから）
+    # Delayed UI update (after team change completes)
     DelayedInfectionUIUpdate()<suspends> : void =
         Sleep(0.3)
         UpdateInfectionUI()
 
-    # Infectionモード: チーム変更後に新しいチームの船にテレポート
+    # Infection mode: Teleport player to new team's ship after team change
     TeleportToNewTeamShip(Agent : agent, NewTeam : team)<suspends> : void =
         if(IsInfectionMode = false):
             return
 
-        # チーム変更が完了するまで少し待機
+        # Wait for team change to complete
         Sleep(0.5)
 
         var TeamName : string = "Unknown"
         var TargetTeleporters : []teleporter_device = array{}
 
-        # 新しいチームに応じてテレポーター配列を選択
-        if (NewTeam = Teams[0]):
+        # Select teleporter array based on new team
+        var TeamCount : int = Teams.Length
+
+        if (TeamCount > 0 and NewTeam = Teams[0]):
             set TargetTeleporters = player_teleportor_team1
             set TeamName = "Red"
-        else if (NewTeam = Teams[1]):
+        else if (TeamCount > 1 and NewTeam = Teams[1]):
             set TargetTeleporters = player_teleportor_team2
             set TeamName = "Blue"
-        else if (NewTeam = Teams[2]):
+        else if (TeamCount > 2 and NewTeam = Teams[2]):
             set TargetTeleporters = player_teleportor_team3
             set TeamName = "Green"
-        else if (NewTeam = Teams[3]):
+        else if (TeamCount > 3 and NewTeam = Teams[3]):
             set TargetTeleporters = player_teleportor_team4
             set TeamName = "Yellow"
+        else:
+            Print("Warning: No teleporters configured for the requested team.")
+            return
 
-        # ランダムなテレポーターにテレポート
+        # Teleport to random teleporter
         TeleportPlayerToRandomDevice(Agent, TargetTeleporters, TeamName)
         Print("Infection: Player teleported to {TeamName} team ship after team change")
 
-    # Infection UI専用の更新メソッド
+    # Update Infection UI with current team counts
     UpdateInfectionUI() : void =
         TeamCollection := GetPlayspace().GetTeamCollection()
-        var Team1Count : int = 0    
+        var Team1Count : int = 0
         var Team2Count : int = 0
         var Team3Count : int = 0
         var Team4Count : int = 0
-        
+
         if(Teams.Length > 0):
             if(Team1Agents := TeamCollection.GetAgents[Teams[0]]):
                 set Team1Count = Team1Agents.Length
-        
+
         if(Teams.Length > 1):
             if(Team2Agents := TeamCollection.GetAgents[Teams[1]]):
                 set Team2Count = Team2Agents.Length
-        
+
         if(Teams.Length > 2):
             if(Team3Agents := TeamCollection.GetAgents[Teams[2]]):
                 set Team3Count = Team3Agents.Length
-        
+
         if(Teams.Length > 3):
             if(Team4Agents := TeamCollection.GetAgents[Teams[3]]):
                 set Team4Count = Team4Agents.Length
-        
-        # InfectionDisplay更新（ここが重要！）
+
+        # Update InfectionDisplay (important!)
         InfectionDisplay.UpdateTeamCounts(Team1Count, Team2Count, Team3Count, Team4Count)
-        
-        # デバッグ用Billboard更新
+
+        # Update debug Billboard
         TeamBalanceText.SetText(TeamBalanceMessage(Team1Count, Team2Count, Team3Count, Team4Count))
 
-    # チーム変更の実行
+    # Execute team change using class selector device
     PerformTeamChange(Agent : agent, NewTeam : team) : void =
-        if (NewTeam = Teams[0]):
+        var TeamCount : int = Teams.Length
+
+        if (TeamCount > 0 and NewTeam = Teams[0]):
             class_selector1.ChangeTeam(Agent)
             Print("Player joined Red Team")
-        else if (NewTeam = Teams[1]):
+        else if (TeamCount > 1 and NewTeam = Teams[1]):
             class_selector2.ChangeTeam(Agent)
             Print("Player joined Blue Team")
-        else if (NewTeam = Teams[2]):
+        else if (TeamCount > 2 and NewTeam = Teams[2]):
             class_selector3.ChangeTeam(Agent)
             Print("Player joined Green Team")
-        else if (NewTeam = Teams[3]):
+        else if (TeamCount > 3 and NewTeam = Teams[3]):
             class_selector4.ChangeTeam(Agent)
             Print("Player joined Yellow Team")
+        else:
+            Print("Warning: Unable to change to requested team - team not configured.")
 
-    # チーム変更の通知
+    # Show notification to player when they change teams
     ShowTeamChangeNotification(Player : player, NewTeam : team) : void =
         var TeamName : string = "Unknown"
-        
-        if (NewTeam = Teams[0]):
+        var TeamCount : int = Teams.Length
+
+        if (TeamCount > 0 and NewTeam = Teams[0]):
             set TeamName = "Red"
-        else if (NewTeam = Teams[1]):
+        else if (TeamCount > 1 and NewTeam = Teams[1]):
             set TeamName = "Blue"
-        else if (NewTeam = Teams[2]):
+        else if (TeamCount > 2 and NewTeam = Teams[2]):
             set TeamName = "Green"
-        else if (NewTeam = Teams[3]):
+        else if (TeamCount > 3 and NewTeam = Teams[3]):
             set TeamName = "Yellow"
-            
+        else:
+            Print("Warning: Unable to determine team name for notification.")
+
         NotificationMessage := ScoreMessage("You have been recruited to {TeamName} Team!")
         HUDMessage.SetText(NotificationMessage)
         HUDMessage.Show(Player)
-        
-        # ビジュアルエフェクト（設定されている場合）
+
+        # Play visual effect (if configured)
         if(FortCharacter := Player.GetFortCharacter[]):
             TeamChangeVFX.Pickup(Player)
 
-    # Infection終了条件のチェック
+    # Check Infection end conditions (1 team remaining = victory)
     CheckInfectionEndCondition(EliminatorPlayer : ?fort_character) : void =
-        Print("Checking Infection end condition")
-        
+        if(IsInfectionMode = false):
+            return
+
+        if(InfectionGameEnded = true):
+            return
+
         TeamCollection := GetPlayspace().GetTeamCollection()
         var ActiveTeams : int = 0
         var WinningTeam : ?team = false
-        
-        # アクティブなチームをカウント
+
         for (i := 0..3):
             if (i < Teams.Length):
                 if (TeamCollection.GetAgents[Teams[i]].Length > 0):
                     set ActiveTeams += 1
                     set WinningTeam = option{Teams[i]}
-        
-        Print("Active teams: {ActiveTeams}")
-        
-        # 1チームだけ残った場合（全員が一つのチームに集まった）
+
+        if (ActiveTeams = 0):
+            Print("No active teams remain in Infection. Ending round.")
+            set InfectionGameEnded = true
+            set InfectionMonitorActive = false
+            set IsInfectionMode = false
+            return
+
         if (ActiveTeams = 1):
             var VictoryAgent : ?agent = false
 
-            # 通常の対人キルで勝利した場合は淘汰側のエージェントを使う
             if (EliminatedFortCharacter := fort_character[EliminatorPlayer?], EliminatedAgent := EliminatedFortCharacter.GetAgent[]):
                 set VictoryAgent = option{EliminatedAgent}
-            # 環境ダメージなどで Eliminator が不明な場合は勝利チームの誰かを探す
             else if (WinningTeamValue := WinningTeam?):
                 if(WinningTeamAgents := TeamCollection.GetAgents[WinningTeamValue]):
                     if (WinningTeamAgents.Length > 0):
@@ -472,14 +522,16 @@ game_rule_device := class(creative_device):
             if (UnwrappedVictoryAgent := VictoryAgent?):
                 Print("Infection Victory! All players united in one team!")
                 EndGame.Activate(UnwrappedVictoryAgent)
+                set InfectionGameEnded = true
+                set InfectionMonitorActive = false
+                set IsInfectionMode = false
             else:
                 Print("Infection victory detected, but no agent available to trigger EndGame.")
-
-    # チーム全滅の確認と通知
+    # Check and notify when teams are eliminated (all players gone)
     CheckEliminatedTeams() : void =
         TeamCollection := GetPlayspace().GetTeamCollection()
-        
-        # チーム1（Red）人数確認
+
+        # Check Team 1 (Red) player count
         if(Teams.Length > 0):
             if(TeamCollection.GetAgents[Teams[0]].Length = 0):
                 if(not eliminatedTeams.Find[Teams[0]]):
@@ -488,7 +540,7 @@ game_rule_device := class(creative_device):
                         HUDMessage.SetText(ScoreMessage("Red Team is Eliminated!"))
                         HUDMessage.Show()
 
-        # チーム2（Blue）人数確認
+        # Check Team 2 (Blue) player count
         if(Teams.Length > 1):
             if(TeamCollection.GetAgents[Teams[1]].Length = 0):
                 if(not eliminatedTeams.Find[Teams[1]]):
@@ -497,7 +549,7 @@ game_rule_device := class(creative_device):
                         HUDMessage.SetText(ScoreMessage("Blue Team is Eliminated!"))
                         HUDMessage.Show()
 
-        # チーム3（Green）人数確認
+        # Check Team 3 (Green) player count
         if(Teams.Length > 2):
             if(TeamCollection.GetAgents[Teams[2]].Length = 0):
                 if(not eliminatedTeams.Find[Teams[2]]):
@@ -506,7 +558,7 @@ game_rule_device := class(creative_device):
                         HUDMessage.SetText(ScoreMessage("Green Team is Eliminated!"))
                         HUDMessage.Show()
 
-        # チーム4（Yellow）人数確認
+        # Check Team 4 (Yellow) player count
         if(Teams.Length > 3):
             if(TeamCollection.GetAgents[Teams[3]].Length = 0):
                 if(not eliminatedTeams.Find[Teams[3]]):
@@ -514,5 +566,3 @@ game_rule_device := class(creative_device):
                         Print("Yellow Team is Eliminated!")
                         HUDMessage.SetText(ScoreMessage("Yellow Team is Eliminated!"))
                         HUDMessage.Show()
-
-

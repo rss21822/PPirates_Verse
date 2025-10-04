@@ -5,121 +5,117 @@ using { /Fortnite.com/Characters }
 using { /UnrealEngine.com/Temporary/UI }
 using { /UnrealEngine.com/Temporary/Diagnostics }
 using { /Verse.org/Colors }
+using { /Verse.org/Simulation }
+using { /UnrealEngine.com/Temporary/SpatialMath }
 
-vote_selection_widget := class():
-    Device : vote_selection_widget_device
+
+vote_selection_player_display := class():
+    OurPlayer : player
     OurPlayerUI : player_ui
-    AssociatedPlayer : player
     var Canvas : ?canvas
+    var ButtonSubscribed : logic = false
+    
+    ScoreMessage<localizes>(msg:string):message="{msg}"
 
-    ButtonLabel<localizes>(value:string) : message = "{value}"
-    BodyText<localizes>(value:string) : message = "{value}"
-
-    VoteTitle:text_block = text_block {
-        DefaultTextColor := NamedColors.White,
-        DefaultText := BodyText("SELECT GAME MODE")
+    VoteInstructionText : text_block = text_block{
+        DefaultTextColor := NamedColors.White
     }
+    VoteButton : button_loud = button_loud{}
 
-    VoteDescription:text_block = text_block {
-        DefaultTextColor := NamedColors.LightGray,
-        DefaultText := BodyText("Cast your vote before the battle starts!")
-    }
-
-    VoteButton:button_loud = button_loud {
-        DefaultText := ButtonLabel("OPEN VOTE")
-    }
+    StringToMessage<localizes>(value:string) : message = "{value}"
 
     InitWidget():void=
-        VoteButton.OnClickEvent().Subscribe(OnVoteButtonClicked)
-        NewCanvas := CreateVoteSelectionUI()
-        OurPlayerUI.AddWidget(NewCanvas, player_ui_slot{ZOrder := 25, InputMode := ui_input_mode.All})
+        SetupCopy()
+        Show()
+
+    SetupCopy():void=
+        VoteInstructionText.SetText(StringToMessage("Choose the next mode"))
+        VoteButton.SetText(StringToMessage("Open Vote"))
+        if(ButtonSubscribed = false):
+            VoteButton.OnClick().Subscribe(OnVoteButtonClicked)
+            set ButtonSubscribed = true
+
+    Show():void=
+        if(Canvas?):
+            return
+        NewCanvas := BuildCanvas()
+        OurPlayerUI.AddWidget(NewCanvas, player_ui_slot{ZOrder := 90, InputMode := ui_input_mode.All})
         set Canvas = option{NewCanvas}
 
     RemoveWidget():void=
         if(RemovedCanvas := Canvas?):
             OurPlayerUI.RemoveWidget(RemovedCanvas)
-        set Canvas = false
+            set Canvas = false
 
-    OnVoteButtonClicked(_:button_loud, PlayerInstigator:?player):void=
-        if(InstigatorPlayer := PlayerInstigator?):
-            Device.HandleVoteButtonClicked(InstigatorPlayer)
-        else:
-            Device.HandleVoteButtonClicked(AssociatedPlayer)
-
-    CreateVoteSelectionUI():canvas=
+    BuildCanvas():canvas=
         canvas:
             Slots := array:
                 canvas_slot:
-                    Anchors := anchors{Minimum := vector2{X := 0.5, Y := 0.85}, Maximum := vector2{X := 0.5, Y := 0.85}}
+                    Anchors := anchors{Minimum := vector2{X := 0.5, Y := 0.82}, Maximum := vector2{X := 0.5, Y := 0.82}}
                     Alignment := vector2{X := 0.5, Y := 0.5}
                     SizeToContent := true
-                    Widget := border:
-                        BackgroundColor := color{R := 0.08, G := 0.08, B := 0.1, A := 0.85}
-                        Padding := margin{Left := 20.0, Right := 20.0, Top := 16.0, Bottom := 16.0}
-                        Content := stack_box:
-                            Orientation := orientation.Vertical
-                            Slots := array:
-                                stack_box_slot:
-                                    HorizontalAlignment := horizontal_alignment.Center
-                                    Padding := margin{Bottom := 6.0}
-                                    Widget := VoteTitle
-                                stack_box_slot:
-                                    HorizontalAlignment := horizontal_alignment.Center
-                                    Padding := margin{Bottom := 10.0}
-                                    Widget := VoteDescription
-                                stack_box_slot:
-                                    HorizontalAlignment := horizontal_alignment.Center
-                                    Widget := VoteButton
+                    Widget := stack_box:
+                        Orientation := orientation.Vertical
+                        Slots := array:
+                            stack_box_slot:
+                                HorizontalAlignment := horizontal_alignment.Center
+                                Padding := margin{Bottom := 6.0}
+                                Widget := VoteInstructionText
+                            stack_box_slot:
+                                HorizontalAlignment := horizontal_alignment.Center
+                                Widget := VoteButton
 
-vote_selection_widget_device := class(creative_device):
-    var WidgetsPerPlayer : [player]vote_selection_widget = map{}
+    OnVoteButtonClicked(Message : widget_message):void=
+        Print("Vote selection widget pressed.")
+
+vote_selection_widget := class():
+    var Displays : [player]vote_selection_player_display = map{}
     var IsActive : logic = false
-    VoteButtonClickedInternal : event(player) = event{}
+    var OwningDevice : ?creative_device = false
 
-    OnVoteButtonClickedEvent():event(player)=
-        VoteButtonClickedInternal
+    SetOwningDevice(InDevice:creative_device):void=
+        set OwningDevice = option{InDevice}
 
-    OnBegin<override>()<suspends>:void=
-        Print("Vote selection widget device initialized")
-        GetPlayspace().PlayerAddedEvent().Subscribe(HandlePlayerAdded)
-
-    ShowVoteSelectionUI():void=
+    Activate():void=
         if(IsActive = true):
             return
-        Print("Showing vote selection UI for all players")
+        Print("Vote selection widget activated")
         set IsActive = true
+        if(ActiveDevice := OwningDevice?):
+            for(Agent : ActiveDevice.GetPlayspace().GetPlayers()):
+                AddDisplayForAgent(Agent)
+        else:
+            Print("Warning: Vote selection widget missing owning device reference.")
 
-        AllPlayers := GetPlayspace().GetPlayers()
-        for (PlayerAgent : AllPlayers):
-            AddWidgetForAgent(PlayerAgent)
-
-    HideVoteSelectionUI():void=
+    Deactivate():void=
         if(IsActive = false):
             return
-        Print("Hiding vote selection UI for all players")
+        Print("Vote selection widget deactivated")
         set IsActive = false
+        ClearDisplays()
 
-        for(Key->Value : WidgetsPerPlayer):
-            Value.RemoveWidget()
-        set WidgetsPerPlayer = map{}
-
-    HandlePlayerAdded(NewAgent:agent):void=
+    HandlePlayerAdded(InAgent:agent):void=
         if(IsActive = false):
             return
-        AddWidgetForAgent(NewAgent)
+        AddDisplayForAgent(InAgent)
 
-    AddWidgetForAgent(InAgent:agent):void=
+    ClearDisplays():void=
+        for(Key->Display : Displays):
+            Display.RemoveWidget()
+        set Displays = map{}
+
+    AddDisplayForAgent(InAgent:agent):void=
         if(InPlayer := player[InAgent]):
             if(PlayerUI := GetPlayerUI[InPlayer]):
-                if(WidgetsPerPlayer[InPlayer] = false):
-                    PerPlayerWidget:vote_selection_widget = vote_selection_widget{
-                        Device := Self,
+                if(ExistingDisplay := Displays[InPlayer]):
+                    ExistingDisplay.Show()
+                else:
+                    NewDisplay := vote_selection_player_display{
+                        OurPlayer := InPlayer,
                         OurPlayerUI := PlayerUI,
-                        AssociatedPlayer := InPlayer
+                        Canvas := false
                     }
-                    PerPlayerWidget.InitWidget()
-                    if(set WidgetsPerPlayer[InPlayer] = PerPlayerWidget){}
-
-    HandleVoteButtonClicked(InPlayer:player):void=
-        Print("Player {InPlayer} interacted with vote selection button")
-        VoteButtonClickedInternal.Broadcast(InPlayer)
+                    NewDisplay.InitWidget()
+                    if(set Displays[InPlayer] = NewDisplay){}
+            else:
+                Print("Warning: Unable to access player UI for vote widget.")

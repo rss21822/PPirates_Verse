@@ -17,6 +17,9 @@ game_rule_device := class(creative_device):
     @editable
     BillBoard_ForDebug : billboard_device = billboard_device{}
 
+    @editable
+    ItemGranter : item_granter_device = item_granter_device{}
+
     # References to display devices for Deathmatch and Infection modes
     @editable
     TeamScoreDisplay : team_score_display_device = team_score_display_device{}
@@ -115,7 +118,6 @@ game_rule_device := class(creative_device):
     player_teleport() : void =
         Print("Vote ended - Teleporting players to their team ships...")
         TeamCollection := GetPlayspace().GetTeamCollection()
-        set Teams = TeamCollection.GetTeams()
         AllPlayers := GetPlayspace().GetPlayers()
         for (Player : AllPlayers):
             # Get player's team assignment
@@ -239,6 +241,8 @@ game_rule_device := class(creative_device):
             return
         Print("New player joined the game!")
 
+        ItemGranter.GrantItem(InPlayer)
+
         # Subscribe to elimination event for Infection mode
         if(FortCharacter := InPlayer.GetFortCharacter[]):
             FortCharacter.EliminatedEvent().Subscribe(OnPlayerEliminatedInfection)
@@ -253,19 +257,56 @@ game_rule_device := class(creative_device):
             return
         Sleep(1.0)  # Wait for character spawn to complete
         TeamCollection := GetPlayspace().GetTeamCollection()
-        set Teams = TeamCollection.GetTeams()
         if(PlayerTeam := TeamCollection.GetTeam[InPlayer]):
+            var TargetTeam : team = PlayerTeam
+
+            if(eliminatedTeams.Find[PlayerTeam]):
+                LeastTeamOption := FindLeastPopulatedActiveTeam()
+                if(LeastTeam := LeastTeamOption?):
+                    if(LeastTeam <> PlayerTeam):
+                        if(FortCharacter := InPlayer.GetFortCharacter[]):
+                            if(Agent := FortCharacter.GetAgent[]):
+                                Print("Reassigning late joiner from eliminated team")
+                                PerformTeamChange(Agent, LeastTeam)
+                                ShowTeamChangeNotification(InPlayer, LeastTeam)
+                                set TargetTeam = LeastTeam
+                                spawn{DelayedInfectionUIUpdate()}
+                            else:
+                                Print("Warning: Unable to acquire agent for late joiner reassignment.")
+                                return
+                        else:
+                            Print("Warning: Unable to acquire character for late joiner reassignment.")
+                            return
+                    else:
+                        set TargetTeam = LeastTeam
+                else:
+                    Print("Warning: No active Infection team available for late joiner reassignment.")
+                    return
             var TeamCount : int = Teams.Length
-            if (TeamCount > 0 and PlayerTeam = Teams[0]):
+
+            if (TeamCount > 0 and TargetTeam = Teams[0]):
                 TeleportPlayerToRandomDevice(InPlayer, player_teleportor_team1, "Red")
-            else if (TeamCount > 1 and PlayerTeam = Teams[1]):
+            else if (TeamCount > 1 and TargetTeam = Teams[1]):
                 TeleportPlayerToRandomDevice(InPlayer, player_teleportor_team2, "Blue")
-            else if (TeamCount > 2 and PlayerTeam = Teams[2]):
+            else if (TeamCount > 2 and TargetTeam = Teams[2]):
                 TeleportPlayerToRandomDevice(InPlayer, player_teleportor_team3, "Green")
-            else if (TeamCount > 3 and PlayerTeam = Teams[3]):
+            else if (TeamCount > 3 and TargetTeam = Teams[3]):
                 TeleportPlayerToRandomDevice(InPlayer, player_teleportor_team4, "Yellow")
             else:
                 Print("Warning: No teleport mapping for late joining player team.")
+
+
+    FindLeastPopulatedActiveTeam() : ?team =
+        TeamCollection := GetPlayspace().GetTeamCollection()
+        var BestTeam : ?team = false
+        var BestCount : int = 2147483647
+        for(Team : Teams):
+            if(not eliminatedTeams.Find[Team]):
+                if(TeamAgents := TeamCollection.GetAgents[Team]):
+                    if(TeamAgents.Length < BestCount):
+                        set BestCount = TeamAgents.Length
+                        set BestTeam = option{Team}
+        return BestTeam
 
     # Ensure late joiner UI is properly updated
     EnsureLateJoinerUI(InPlayer : player)<suspends> : void =
@@ -330,7 +371,6 @@ game_rule_device := class(creative_device):
         # Wait for team change to complete
         Sleep(0.5)
         TeamCollection := GetPlayspace().GetTeamCollection()
-        set Teams = TeamCollection.GetTeams()
         var TeamName : string = "Unknown"
         var TargetTeleporters : []teleporter_device = array{}
 

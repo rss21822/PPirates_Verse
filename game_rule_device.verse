@@ -117,6 +117,9 @@ game_rule_device := class(creative_device):
         vote_group.EndVoteEvent.Subscribe(player_teleport)
         vote_group.VoteTiedEvent.Subscribe(randam_vote_select)
 
+        # Ensure voting-phase joiners receive their loadout
+        GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAddedDuringVoting)
+
     # Teleport all players to their team ships after voting ends
     player_teleport() : void =
         Print("Vote ended - Teleporting players to their team ships with staggered delays...")
@@ -141,6 +144,10 @@ game_rule_device := class(creative_device):
                 else:
                     Print("Warning: No teleport mapping for player team.")
         Print("Teleport process initiated for all teams!")
+
+    # Grant loadout to players joining during the voting phase
+    OnPlayerAddedDuringVoting(InPlayer : player) : void =
+        ItemGranter.GrantItem(InPlayer)
 
     # Get teleporters and team name for a given team
     GetTeleportersForTeam(TargetTeam : team) : []teleporter_device =

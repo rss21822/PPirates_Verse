@@ -63,6 +63,10 @@ game_rule_device := class(creative_device):
     # Array tracking which teams have been eliminated (Infection mode)
     var eliminatedTeams : []team = array{}
 
+    # Tracks which team has already been counted for each player when Infection is active
+    var LateJoinerTrackedTeams : [player]team = map{}
+    var LateJoinerActive : [player]logic = map{}
+
     # Infection mode state flags
     var IsInfectionMode : logic = false
     var PlayerAddedSubscribed : logic = false
@@ -106,22 +110,15 @@ game_rule_device := class(creative_device):
         # Update Teams array with island configuration
         TeamCollection := GetPlayspace().GetTeamCollection()
         set Teams = TeamCollection.GetTeams()
+        set InfectionTeamCounts = map{}
+        set LateJoinerTrackedTeams = map{}
+        set LateJoinerActive = map{}
 
-        # Initialize player count for each team
+        # Initialize player count for each team (for Deathmatch mode)
         for(Team : Teams):
             if(TeamPlayers := TeamCollection.GetAgents[Team].Length):
                 if(set teams_playerCount_length[Team] = TeamPlayers):
                     Print("Team initialized with {TeamPlayers} players")
-                # Initialize Infection team counts
-                if(set InfectionTeamCounts[Team] = TeamPlayers):
-                    Print("Infection team count initialized: {TeamPlayers}")
-
-        # Record all players' initial teams for handling disconnections
-        AllPlayers := GetPlayspace().GetPlayers()
-        for(Player : AllPlayers):
-            if(PlayerTeam := TeamCollection.GetTeam[Player]):
-                if(set PlayerInitialTeams[Player] = PlayerTeam):
-                    Print("Recorded player's initial team")
 
         # Subscribe to vote events
         vote_optionA.WinVoteEvent.Subscribe(OnVoteASuccess)
@@ -130,24 +127,9 @@ game_rule_device := class(creative_device):
         vote_group.EndVoteEvent.Subscribe(player_teleport)
         vote_group.VoteTiedEvent.Subscribe(randam_vote_select)
 
-        GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAddedA)
-        GetPlayspace().PlayerRemovedEvent().Subscribe(OnPlayerRemovedBeforeGameStart)
-
-    OnPlayerAdded(InPlayer : player) : void =
-        ItemGranter.GrantItem(InPlayer)
-
-    # Handle player leaving before game start (during voting)
-    OnPlayerRemovedBeforeGameStart(InPlayer : player) : void =
-        Print("Player left during voting phase")
-        # Use recorded team info since player is already disconnected
-        if(PlayerTeam := PlayerInitialTeams[InPlayer]):
-            if(CurrentCount := InfectionTeamCounts[PlayerTeam]):
-                if(set InfectionTeamCounts[PlayerTeam] = CurrentCount - 1):
-                    Print("Decremented Infection team count for player who left during voting")
-
     # Teleport all players to their team ships after voting ends
     player_teleport() : void =
-        Print("Vote ended - Teleporting players to their team ships...")
+        Print("Vote ended - Teleporting players to their team ships with staggered delays...")
         TeamCollection := GetPlayspace().GetTeamCollection()
         AllPlayers := GetPlayspace().GetPlayers()
         for (Player : AllPlayers):
@@ -155,18 +137,26 @@ game_rule_device := class(creative_device):
             if (PlayerTeam := TeamCollection.GetTeam[Player]):
                 var TeamCount : int = Teams.Length
                 if (TeamCount > 0 and PlayerTeam = Teams[0]):
+                    # Team 1: Immediate teleport
                     TeleportPlayerToRandomDevice(Player, player_teleportor_team1, "Red")
                 else if (TeamCount > 1 and PlayerTeam = Teams[1]):
-                    BillBoard_ForDebug.SetText(ScoreMessage("TeamCount > 1 and PlayerTeam = Teams[1]"))
-                    BillBoard_ForDebug.ShowText()
-                    TeleportPlayerToRandomDevice(Player, player_teleportor_team2, "Blue")
+                    # Team 2: 2.0 second delay
+                    spawn{DelayedTeleport(Player, player_teleportor_team2, "Blue", 4.0)}
                 else if (TeamCount > 2 and PlayerTeam = Teams[2]):
-                    TeleportPlayerToRandomDevice(Player, player_teleportor_team3, "Green")
+                    # Team 3: 4.0 second delay
+                    spawn{DelayedTeleport(Player, player_teleportor_team3, "Green", 1.0)}
                 else if (TeamCount > 3 and PlayerTeam = Teams[3]):
-                    TeleportPlayerToRandomDevice(Player, player_teleportor_team4, "Yellow")
+                    # Team 4: 6.0 second delay
+                    spawn{DelayedTeleport(Player, player_teleportor_team4, "Yellow", 1.0)}
                 else:
                     Print("Warning: No teleport mapping for player team.")
-        Print("All players teleported to their team ships!")
+        Print("Teleport process initiated for all teams!")
+
+    # Delayed teleport with specified delay
+    DelayedTeleport(Player : agent, Teleporters : []teleporter_device, TeamName : string, Delay : float)<suspends> : void =
+        Sleep(Delay)
+        TeleportPlayerToRandomDevice(Player, Teleporters, TeamName)
+        Print("Delayed teleport completed for {TeamName} team after {Delay} seconds")
 
     # Handle vote tie - randomly select between Vote A and B, then teleport players
     randam_vote_select() : void =
@@ -213,11 +203,42 @@ game_rule_device := class(creative_device):
         StopInfectionMonitor()
         set InfectionGameEnded = false
         InfectionDisplay.DeactivateUI()
+        set InfectionTeamCounts = map{}
+        set LateJoinerTrackedTeams = map{}
+        set LateJoinerActive = map{}
 
         # Activate Deathmatch Mode UI
         TeamScoreDisplay.ActivateDeathmatchMode()
 
-        GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAddedA)
+        # Subscribe to PlayerAdded for Deathmatch mode only
+        GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAddedDeathmatch)
+
+    # Handle player joining during Deathmatch mode
+    OnPlayerAddedDeathmatch(InPlayer : player) : void =
+        ItemGranter.GrantItem(InPlayer)
+
+    # Handle player joining during Infection mode
+    OnPlayerAddedInfection(InPlayer : player) : void =
+        if(IsInfectionMode = false):
+            return
+
+        Print("Player joined during Infection mode")
+        ItemGranter.GrantItem(InPlayer)
+
+        # Subscribe to elimination event for Infection mode
+        if(FortCharacter := InPlayer.GetFortCharacter[]):
+            FortCharacter.EliminatedEvent().Subscribe(OnPlayerEliminatedInfection)
+
+        # Track initial team for late joiner
+        TeamCollection := GetPlayspace().GetTeamCollection()
+        if(PlayerTeam := TeamCollection.GetTeam[InPlayer]):
+            if(set PlayerInitialTeams[InPlayer] = PlayerTeam):
+                Print("Late joiner initial team tracked")
+
+        # Teleport player to their team ship (with delay)
+        spawn{TeleportLateJoiningPlayer(InPlayer)}
+        spawn{EnsureLateJoinerUI(InPlayer)}
+        spawn{MonitorLateJoinerTeamChange(InPlayer)}
 
     # Vote B: Infection Mode
     OnVoteBSuccess(InPlayer : ?agent) : void =
@@ -227,16 +248,18 @@ game_rule_device := class(creative_device):
         GameModeText.SetText(ScoreMessage("Mode: Infection"))
         set IsInfectionMode = true
         set eliminatedTeams = array{}
-
-        # InfectionTeamCounts is already initialized in OnBegin and managed by PlayerAdded/Removed events
-        # No need to re-initialize here to avoid count discrepancies
+        RefreshInfectionTeamState()
 
         TeamScoreDisplay.ActivateInfectionMode()
+
+        # Subscribe to PlayerAdded/RemovedEvent for Infection mode only
         if(PlayerAddedSubscribed = false):
-            GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAddedB)
+            GetPlayspace().PlayerAddedEvent().Subscribe(OnPlayerAddedInfection)
             GetPlayspace().PlayerRemovedEvent().Subscribe(OnPlayerRemovedInfection)
             set PlayerAddedSubscribed = true
+
         InfectionDisplay.ActivateInfectionUI()
+        UpdateInfectionUI()
         spawn{InitialInfectionUIUpdate()}
         AllPlayers := GetPlayspace().GetPlayers()
         for (Player : AllPlayers):
@@ -246,9 +269,26 @@ game_rule_device := class(creative_device):
         HUDMessage.Show()
         StartInfectionMonitor()
 
-    # Handle player joining mid-game during Infection mode
-    OnPlayerAddedA(InPlayer : player) : void =
-        ItemGranter.GrantItem(InPlayer)
+    RefreshInfectionTeamState() : void =
+        TeamCollection := GetPlayspace().GetTeamCollection()
+        set InfectionTeamCounts = map{}
+        set LateJoinerTrackedTeams = map{}
+        set LateJoinerActive = map{}
+        set PlayerInitialTeams = map{}
+
+        for(Team : Teams):
+            var TeamSize : int = 0
+            if(TeamAgents := TeamCollection.GetAgents[Team]):
+                set TeamSize = TeamAgents.Length
+            if(set InfectionTeamCounts[Team] = TeamSize):
+                Print("Infection count initialized for team with {TeamSize} players")
+
+        AllPlayers := GetPlayspace().GetPlayers()
+        for(CurrentPlayer : AllPlayers):
+            if(PlayerTeam := TeamCollection.GetTeam[CurrentPlayer]):
+                if(set PlayerInitialTeams[CurrentPlayer] = PlayerTeam){}
+                if(set LateJoinerTrackedTeams[CurrentPlayer] = PlayerTeam){}
+                if(set LateJoinerActive[CurrentPlayer] = true){}
 
     # Start monitoring infection teams for elimination/victory conditions
     StartInfectionMonitor() : void =
@@ -277,70 +317,60 @@ game_rule_device := class(creative_device):
         else:
             set InfectionMonitorActive = false
 
-    # Handle player joining mid-game during Infection mode
-    OnPlayerAddedB(InPlayer : player) : void =
-        if(IsInfectionMode = false):
-            return
-        Print("New player joined the game!")
-
-        ItemGranter.GrantItem(InPlayer)
-
-        # Subscribe to elimination event for Infection mode
-        if(FortCharacter := InPlayer.GetFortCharacter[]):
-            FortCharacter.EliminatedEvent().Subscribe(OnPlayerEliminatedInfection)
-
-        # Track initial team for late joiner
-        TeamCollection := GetPlayspace().GetTeamCollection()
-        if(PlayerTeam := TeamCollection.GetTeam[InPlayer]):
-            if(set PlayerInitialTeams[InPlayer] = PlayerTeam):
-                Print("Late joiner initial team tracked")
-
-        # Teleport player to their team ship (with delay)
-        spawn{TeleportLateJoiningPlayer(InPlayer)}
-        spawn{EnsureLateJoinerUI(InPlayer)}
-        spawn{MonitorLateJoinerTeamChange(InPlayer)}
 
     # Monitor late joiner team changes (for eliminated team reassignment)
     MonitorLateJoinerTeamChange(InPlayer : player)<suspends> : void =
+        Sleep(0.5)
         if(IsInfectionMode = false):
             return
-        Sleep(1.5)  # Wait for potential team change
         TeamCollection := GetPlayspace().GetTeamCollection()
         if(CurrentTeam := TeamCollection.GetTeam[InPlayer]):
-            if(InitialTeam := PlayerInitialTeams[InPlayer]):
-                if(CurrentTeam <> InitialTeam):
-                    # Team was changed - adjust counts
-                    Print("Late joiner team changed detected: adjusting counts")
-                    # Add to new team
-                    if(CurrentCount := InfectionTeamCounts[CurrentTeam]):
-                        if(set InfectionTeamCounts[CurrentTeam] = CurrentCount + 1):
-                            Print("Added late joiner to new team count")
-                    else:
-                        if(set InfectionTeamCounts[CurrentTeam] = 1):
-                            Print("Initialized new team count for late joiner")
-                    # Remove from initial team
-                    if(InitialCount := InfectionTeamCounts[InitialTeam]):
-                        if(set InfectionTeamCounts[InitialTeam] = InitialCount - 1):
-                            Print("Removed late joiner from initial team count")
-                    spawn{DelayedInfectionUIUpdate()}
-                else:
-                    # No team change - just increment
-                    if(CurrentCount := InfectionTeamCounts[CurrentTeam]):
-                        if(set InfectionTeamCounts[CurrentTeam] = CurrentCount + 1):
-                            Print("Incremented team count for late joiner")
-                    else:
-                        if(set InfectionTeamCounts[CurrentTeam] = 1):
-                            Print("Initialized team count for late joiner")
-                    spawn{DelayedInfectionUIUpdate()}
+            var CountsChanged : logic = false
+            var AlreadyCounted : logic = false
+
+            if(ActiveState := LateJoinerActive[InPlayer]):
+                if(ActiveState = true):
+                    set AlreadyCounted = true
+
+            if(AlreadyCounted = true):
+                if(TrackedTeam := LateJoinerTrackedTeams[InPlayer]):
+                    if(TrackedTeam <> CurrentTeam):
+                        Print("Late joiner team change detected")
+                        if(TrackedCount := InfectionTeamCounts[TrackedTeam]):
+                            if(TrackedCount > 0):
+                                if(set InfectionTeamCounts[TrackedTeam] = TrackedCount - 1):
+                                    Print("Decremented previous team count for late joiner")
+                                    set CountsChanged = true
+                        if(NewTeamCount := InfectionTeamCounts[CurrentTeam]):
+                            if(set InfectionTeamCounts[CurrentTeam] = NewTeamCount + 1):
+                                Print("Incremented new team count for late joiner")
+                                set CountsChanged = true
+                        else:
+                            if(set InfectionTeamCounts[CurrentTeam] = 1):
+                                Print("Initialized new team count for late joiner")
+                                set CountsChanged = true
+                        if(set LateJoinerTrackedTeams[InPlayer] = CurrentTeam){}
+                        if(set PlayerInitialTeams[InPlayer] = CurrentTeam){}
+                        if(set LateJoinerActive[InPlayer] = true){}
             else:
-                # No initial team tracked - just increment current
+                # First time we see this player during Infection - add them to the current team count
                 if(CurrentCount := InfectionTeamCounts[CurrentTeam]):
                     if(set InfectionTeamCounts[CurrentTeam] = CurrentCount + 1):
-                        Print("Incremented team count for late joiner (no initial)")
+                        Print("Registered late joiner on current team")
+                        set CountsChanged = true
                 else:
                     if(set InfectionTeamCounts[CurrentTeam] = 1):
-                        Print("Initialized team count for late joiner (no initial)")
+                        Print("Initialized team count for new late joiner")
+                        set CountsChanged = true
+                if(set LateJoinerTrackedTeams[InPlayer] = CurrentTeam){}
+                if(set PlayerInitialTeams[InPlayer] = CurrentTeam){}
+                if(set LateJoinerActive[InPlayer] = true){}
+
+            if(CountsChanged = true):
                 spawn{DelayedInfectionUIUpdate()}
+
+            if(IsInfectionMode = true):
+                spawn{MonitorLateJoinerTeamChange(InPlayer)}
 
     # Handle player leaving during Infection mode
     OnPlayerRemovedInfection(InPlayer : player) : void =
@@ -353,6 +383,7 @@ game_rule_device := class(creative_device):
                 if(set InfectionTeamCounts[PlayerTeam] = CurrentCount - 1):
                     Print("Decremented team count for leaving player")
                     spawn{DelayedInfectionUIUpdate()}
+            if(set LateJoinerActive[InPlayer] = false){}
 
     # Teleport late-joining player to their team ship
     TeleportLateJoiningPlayer(InPlayer : player)<suspends> : void =

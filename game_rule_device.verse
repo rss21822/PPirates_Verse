@@ -253,9 +253,9 @@ game_rule_device := class(creative_device):
                 Print("Late joiner initial team tracked")
 
         # Teleport player to their team ship (with delay)
+        # TeleportLateJoiningPlayer now handles InfectionTeamCounts update
         spawn{TeleportLateJoiningPlayer(InPlayer)}
         spawn{EnsureLateJoinerUI(InPlayer)}
-        spawn{MonitorLateJoinerTeamChange(InPlayer)}
 
     # Vote B: Infection Mode
     OnVoteBSuccess(InPlayer : ?agent) : void =
@@ -291,17 +291,27 @@ game_rule_device := class(creative_device):
         set InfectionTeamCounts = map{}
         set PlayerInitialTeams = map{}
 
+        # Initialize all team counts to 0
         for(Team : Teams):
-            var TeamSize : int = 0
-            if(TeamAgents := TeamCollection.GetAgents[Team]):
-                set TeamSize = TeamAgents.Length
-            if(set InfectionTeamCounts[Team] = TeamSize):
-                Print("Infection count initialized for team with {TeamSize} players")
+            if(set InfectionTeamCounts[Team] = 0):
+                Print("Initialized team count to 0")
 
+        # Count only active players (prevents counting disconnected players)
         AllPlayers := GetPlayspace().GetPlayers()
         for(CurrentPlayer : AllPlayers):
             if(PlayerTeam := TeamCollection.GetTeam[CurrentPlayer]):
+                # Increment count for this team
+                if(CurrentCount := InfectionTeamCounts[PlayerTeam]):
+                    if(set InfectionTeamCounts[PlayerTeam] = CurrentCount + 1){}
+                else:
+                    if(set InfectionTeamCounts[PlayerTeam] = 1){}
+                # Track player's initial team
                 if(set PlayerInitialTeams[CurrentPlayer] = PlayerTeam){}
+
+        # Print final counts for verification
+        for(Team : Teams):
+            if(FinalCount := InfectionTeamCounts[Team]):
+                Print("Infection count initialized for {GetTeamName(Team)}: {FinalCount} players")
 
     # Start monitoring infection teams for elimination/victory conditions
     StartInfectionMonitor() : void =
@@ -354,11 +364,14 @@ game_rule_device := class(creative_device):
                 if(FinalTeam <> InitialTeamValue):
                     Print("Late joiner team change detected - adjusting counts")
 
-                    # Decrement initial team (only if count > 0)
+                    # Decrement initial team (only if count > 0, clamp to 0)
                     if(InitialCount := InfectionTeamCounts[InitialTeamValue]):
                         if(InitialCount > 0):
-                            if(set InfectionTeamCounts[InitialTeamValue] = InitialCount - 1):
+                            NewCount := if(InitialCount - 1 < 0) then 0 else InitialCount - 1
+                            if(set InfectionTeamCounts[InitialTeamValue] = NewCount):
                                 Print("Decremented initial team count for late joiner")
+                                if(NewCount = 0):
+                                    Print("Warning: Team count clamped to 0 (MonitorLateJoinerTeamChange)")
 
                     # Increment final team
                     if(FinalCount := InfectionTeamCounts[FinalTeam]):
@@ -381,8 +394,11 @@ game_rule_device := class(creative_device):
         TeamCollection := GetPlayspace().GetTeamCollection()
         if(PlayerTeam := TeamCollection.GetTeam[InPlayer]):
             if(CurrentCount := InfectionTeamCounts[PlayerTeam]):
-                if(set InfectionTeamCounts[PlayerTeam] = CurrentCount - 1):
+                NewCount := if(CurrentCount - 1 < 0) then 0 else CurrentCount - 1
+                if(set InfectionTeamCounts[PlayerTeam] = NewCount):
                     Print("Decremented team count for leaving player")
+                    if(NewCount = 0):
+                        Print("Warning: Team count clamped to 0 (OnPlayerRemovedInfection)")
                     spawn{DelayedInfectionUIUpdate()}
 
     # Teleport late-joining player to their team ship
@@ -393,17 +409,34 @@ game_rule_device := class(creative_device):
         TeamCollection := GetPlayspace().GetTeamCollection()
         if(PlayerTeam := TeamCollection.GetTeam[InPlayer]):
             var TargetTeam : team = PlayerTeam
+            var TeamWasChanged : logic = false
 
+            # Check if player was assigned to eliminated team and needs reassignment
             if(eliminatedTeams.Find[PlayerTeam]):
                 LeastTeamOption := FindLeastPopulatedActiveTeam()
                 if(LeastTeam := LeastTeamOption?):
                     if(LeastTeam <> PlayerTeam):
                         if(FortCharacter := InPlayer.GetFortCharacter[]):
                             if(Agent := FortCharacter.GetAgent[]):
-                                Print("Reassigning late joiner from eliminated team")
+                                Print("Reassigning late joiner from eliminated team {GetTeamName(PlayerTeam)} to {GetTeamName(LeastTeam)}")
                                 PerformTeamChange(Agent, LeastTeam)
+
+                                # Update InfectionTeamCounts immediately after team change
+                                # No need to decrement eliminated team (already 0)
+                                if(NewTeamCount := InfectionTeamCounts[LeastTeam]):
+                                    if(set InfectionTeamCounts[LeastTeam] = NewTeamCount + 1):
+                                        Print("Incremented {GetTeamName(LeastTeam)} team count for late joiner reassignment")
+                                else:
+                                    if(set InfectionTeamCounts[LeastTeam] = 1):
+                                        Print("Initialized {GetTeamName(LeastTeam)} team count for late joiner reassignment")
+
+                                # Update PlayerInitialTeams to reflect new team
+                                if(set PlayerInitialTeams[InPlayer] = LeastTeam):
+                                    Print("Updated late joiner initial team to {GetTeamName(LeastTeam)}")
+
                                 ShowTeamChangeNotification(InPlayer, LeastTeam)
                                 set TargetTeam = LeastTeam
+                                set TeamWasChanged = true
                                 spawn{DelayedInfectionUIUpdate()}
                             else:
                                 Print("Warning: Unable to acquire agent for late joiner reassignment.")
@@ -416,6 +449,16 @@ game_rule_device := class(creative_device):
                 else:
                     Print("Warning: No active Infection team available for late joiner reassignment.")
                     return
+            else:
+                # Player assigned to active team, increment count
+                if(CurrentCount := InfectionTeamCounts[PlayerTeam]):
+                    if(set InfectionTeamCounts[PlayerTeam] = CurrentCount + 1):
+                        Print("Incremented {GetTeamName(PlayerTeam)} team count for late joiner")
+                else:
+                    if(set InfectionTeamCounts[PlayerTeam] = 1):
+                        Print("Initialized {GetTeamName(PlayerTeam)} team count for late joiner")
+                spawn{DelayedInfectionUIUpdate()}
+
             # Use common teleport function
             Teleporters := GetTeleportersForTeam(TargetTeam)
             TeamName := GetTeamName(TargetTeam)
@@ -466,8 +509,11 @@ game_rule_device := class(creative_device):
 
                             # Update Infection team counts: -1 from eliminated team, +1 to eliminator team
                             if(EliminatedCount := InfectionTeamCounts[EliminatedPlayerTeam]):
-                                if(set InfectionTeamCounts[EliminatedPlayerTeam] = EliminatedCount - 1):
+                                NewCount := if(EliminatedCount - 1 < 0) then 0 else EliminatedCount - 1
+                                if(set InfectionTeamCounts[EliminatedPlayerTeam] = NewCount):
                                     Print("Decremented eliminated player's team count")
+                                    if(NewCount = 0):
+                                        Print("Warning: Team count clamped to 0 (OnPlayerEliminatedInfection)")
                             if(EliminatorCount := InfectionTeamCounts[EliminatorPlayerTeam]):
                                 if(set InfectionTeamCounts[EliminatorPlayerTeam] = EliminatorCount + 1):
                                     Print("Incremented eliminator's team count")
@@ -503,26 +549,37 @@ game_rule_device := class(creative_device):
         UpdateInfectionUI()
 
     # Infection mode: Teleport player to new team's ship after team change
+    # Uses multiple retry attempts to ensure successful teleport after respawn
     TeleportToNewTeamShip(Agent : agent, NewTeam : team)<suspends> : void =
         if(IsInfectionMode = false):
             return
 
-        # Wait for team change to complete
-        Sleep(0.5)
-        TeamCollection := GetPlayspace().GetTeamCollection()
-        var TargetTeam : team = NewTeam
-        if(CurrentTeam := TeamCollection.GetTeam[Agent]):
-            set TargetTeam = CurrentTeam
+        # Use NewTeam parameter directly (don't re-query as team change may not be complete yet)
+        TargetTeleporters := GetTeleportersForTeam(NewTeam)
+        TeamName := GetTeamName(NewTeam)
 
-        # Use common teleport helper functions
-        TargetTeleporters := GetTeleportersForTeam(TargetTeam)
-        TeamName := GetTeamName(TargetTeam)
-
-        if(TargetTeleporters.Length > 0):
-            TeleportPlayerToRandomDevice(Agent, TargetTeleporters, TeamName)
-        else:
+        if(TargetTeleporters.Length = 0):
             Print("Warning: No teleporters configured for the requested team.")
-        Print("Infection: Player teleported to {TeamName} team ship after team change")
+            return
+
+        # Multiple teleport attempts to handle respawn timing issues
+        # First attempt: After initial delay (respawn may be in progress)
+        Sleep(1.5)
+        if(IsInfectionMode = true):
+            TeleportPlayerToRandomDevice(Agent, TargetTeleporters, TeamName)
+            Print("Infection: Teleport attempt 1 to {TeamName} team ship")
+
+        # Second attempt: After respawn should be complete
+        Sleep(1.5)
+        if(IsInfectionMode = true):
+            TeleportPlayerToRandomDevice(Agent, TargetTeleporters, TeamName)
+            Print("Infection: Teleport attempt 2 to {TeamName} team ship")
+
+        # Third attempt: Final retry to ensure successful teleport
+        Sleep(1.5)
+        if(IsInfectionMode = true):
+            TeleportPlayerToRandomDevice(Agent, TargetTeleporters, TeamName)
+            Print("Infection: Teleport attempt 3 to {TeamName} team ship (final)")
 
     # Update Infection UI with current team counts (using Verse-side data)
     UpdateInfectionUI() : void =
@@ -599,6 +656,7 @@ game_rule_device := class(creative_device):
             return
 
         # Use Verse-side InfectionTeamCounts for accurate team state
+        # Treat team count <= 0 as eliminated (safety check for negative values)
         var ActiveTeams : int = 0
         var WinningTeam : ?team = false
         for (Team : Teams):
@@ -606,6 +664,8 @@ game_rule_device := class(creative_device):
                 if(TeamCount > 0):
                     set ActiveTeams += 1
                     set WinningTeam = option{Team}
+                else if(TeamCount < 0):
+                    Print("Warning: Negative team count detected ({TeamCount}), treating as eliminated")
 
         if (ActiveTeams = 0):
             Print("No active teams remain in Infection. Ending round.")

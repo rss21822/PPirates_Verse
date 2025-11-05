@@ -15,6 +15,7 @@ using { /Fortnite.com/UI }
 using { /Fortnite.com/Devices }
 using { /Fortnite.com/Characters }
 using { /Fortnite.com/Game }
+using { /Fortnite.com/Playspaces }
 using { /Verse.org/Simulation }
 using { /Verse.org/Colors }
 using { /Verse.org/Assets }
@@ -23,6 +24,9 @@ using { /UnrealEngine.com/Temporary/UI }
 using { /UnrealEngine.com/Temporary/Diagnostics }
 using { /UnrealEngine.com/Temporary/SpatialMath }
 using { AllRanks }
+
+# モジュールレベルでweak_mapを定義（持続データ用）
+var PlayerStatsMap : weak_map(player, CustomPlayer) = map{}
 
 CustomPlayer := class<persistable><final>():
     PlayerName : string = ""
@@ -48,7 +52,6 @@ RankManager := class(creative_device):
     @editable StatsBoard : Stats = Stats{}
 
     var Players : []player = array{}
-    var PlayerStatsMap : [player]CustomPlayer = map{}
 
     OnBegin<override>()<suspends>:void=
         set Players = GetPlayspace().GetPlayers()
@@ -89,22 +92,29 @@ RankManager := class(creative_device):
             if(set PlayerStatsMap[Player] = NewStats):
                 Print("New Player stats were created")
 
+    # 持続データの取得
     GetPlayerStats(Player:player):CustomPlayer =
-        if(Stats1 := PlayerStatsMap[Player]):
-            Stats1
+        if(PlayerStats := PlayerStatsMap[Player]):
+            PlayerStats
         else:
+            # 新規プレイヤーの場合はデフォルト値を返す
             CustomPlayer{}
+
+    # 持続データの保存
+    SetPlayerStats(Player:player, PlayerStats:CustomPlayer):void=
+        if(set PlayerStatsMap[Player] = PlayerStats):
+            Print("Player stats saved for {PlayerStats.PlayerName}")
 
     UpdateStats(Player:player, PlayerName:string, NewKills:int, NewDeaths:int, NewPoints:int, NewRank:int):CustomPlayer=
         UpdatedStats := UpdatePlayerStats(PlayerName, NewKills, NewDeaths, NewPoints, NewRank)
-        if ( set PlayerStatsMap[Player] = UpdatedStats):
-            Print("Updated player stats!")
-            Print("Player Name • {UpdatedStats.PlayerName}")
-            Print("Eliminations • {UpdatedStats.PlayerKills}")
-            Print("Deaths • {UpdatedStats.PlayerDeaths}")
-            Print("Points • {UpdatedStats.PlayerPoints}")
-            Print("Rank • {UpdatedStats.PlayerRank}")
-
+        # SetPlayerStatsを使って明示的に保存
+        SetPlayerStats(Player, UpdatedStats)
+        Print("Updated player stats!")
+        Print("Player Name • {UpdatedStats.PlayerName}")
+        Print("Eliminations • {UpdatedStats.PlayerKills}")
+        Print("Deaths • {UpdatedStats.PlayerDeaths}")
+        Print("Points • {UpdatedStats.PlayerPoints}")
+        Print("Rank • {UpdatedStats.PlayerRank}")
         return UpdatedStats
     
     GiveBackbling(Player : player, Custom_Player : CustomPlayer, Rank_Settings : RankSettings):void=

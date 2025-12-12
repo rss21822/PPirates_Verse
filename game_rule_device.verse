@@ -42,6 +42,15 @@ game_rule_device := class(creative_device):
     class_selector3 : class_and_team_selector_device = class_and_team_selector_device{}
     @editable
     class_selector4 : class_and_team_selector_device = class_and_team_selector_device{}
+    
+    @editable
+    Elimination_Device_Team1 : elimination_manager_device = elimination_manager_device{}
+    @editable
+    Elimination_Device_Team2 : elimination_manager_device = elimination_manager_device{}
+    @editable
+    Elimination_Device_Team3 : elimination_manager_device = elimination_manager_device{}
+    @editable
+    Elimination_Device_Team4 : elimination_manager_device = elimination_manager_device{}
 
     var Teams:[]team = array{}
 
